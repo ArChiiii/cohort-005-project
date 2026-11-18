@@ -1,5 +1,5 @@
 import { data } from "react-router";
-import { eq, and } from "drizzle-orm";
+import { eq, and, desc } from "drizzle-orm";
 import { db } from "~/db";
 import {
   UserRole,
@@ -7,6 +7,8 @@ import {
   courses,
   enrollments,
   purchases,
+  refundRequests,
+  RefundRequestStatus,
 } from "~/db/schema";
 import { getCurrentUserId } from "~/lib/session";
 import { resolveCountry } from "~/lib/country.server";
@@ -39,6 +41,22 @@ function findPurchase(userId: number, courseId: number) {
     .select()
     .from(purchases)
     .where(and(eq(purchases.userId, userId), eq(purchases.courseId, courseId)))
+    .orderBy(desc(purchases.createdAt))
+    .get();
+}
+
+// A Refunded Purchase — one whose Refund Request was approved — no longer
+// gives access to the course.
+function isRefunded(purchaseId: number) {
+  return !!db
+    .select({ id: refundRequests.id })
+    .from(refundRequests)
+    .where(
+      and(
+        eq(refundRequests.purchaseId, purchaseId),
+        eq(refundRequests.status, RefundRequestStatus.Approved)
+      )
+    )
     .get();
 }
 
@@ -59,6 +77,7 @@ export type Access = {
   isOwningInstructor: boolean;
   /** Owning instructor or admin — the people who speak for the course. */
   isStaff: boolean;
+  /** Enrolled, and their Purchase is not a Refunded Purchase. */
   enrolled: boolean;
   pppBlocked: boolean;
   pppBlockedCountry: string | null;
@@ -97,7 +116,9 @@ export async function getAccess(
   const isAdmin = user.role === UserRole.Admin;
   const isOwningInstructor = course?.instructorId === userId;
   const isStaff = isAdmin || isOwningInstructor;
-  const enrolled = isUserEnrolled(userId, courseId);
+  const purchase = findPurchase(userId, courseId);
+  const enrolled =
+    isUserEnrolled(userId, courseId) && !(purchase && isRefunded(purchase.id));
 
   // PPP only restricts students who bought at a discount — staff are exempt.
   let ppp = {
@@ -107,7 +128,6 @@ export async function getAccess(
   };
 
   if (enrolled && !isStaff && course) {
-    const purchase = findPurchase(userId, courseId);
     const currentCountry = await resolveCountry(request);
     ppp = checkPppAccess(
       course.price,
